@@ -1,0 +1,267 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Mar 17 20:55:32 2025
+
+@author: davi
+"""
+
+import numpy as np
+from scipy.sparse import csc_array
+from scipy.sparse.linalg import expm as expmsp
+import itertools
+from joblib import Parallel, delayed
+import matplotlib.pyplot as plt
+import datetime 
+
+
+inicio = datetime.datetime.now()
+
+
+open('densidade.txt', 'w').close()
+
+
+
+#Função geradora dos estados acessíveis 
+def generate_fermionic_states(S, N, a, b, wa, wd):
+    
+    config = []
+
+    min_N = 0 if (b[w] != 0 or wd[w] != 0) else N  # S, so N can decrease
+    max_N = S if (a[w] != 0 or wa[w] != 0) else N  # Particles can attach, so N can increase
+
+    # Generate states in parallel for each N in the range
+    def generate_states_for_N(n):
+        states = list(itertools.combinations(range(S), n))
+        config_n = []
+        for state in states:
+            config_i = [0] * S
+            for site in state:
+                config_i[site] = 1
+            config_n.append(tuple(config_i))
+        return config_n
+
+    # Parallelize state generation for each N
+    config = Parallel(n_jobs=-1)(delayed(generate_states_for_N)(n) 
+                                 for n in range(min_N, max_N + 1))
+    
+    # Flatten the list of lists
+    config = [state for sublist in config for state in sublist]
+    
+    return config
+
+#Função Delta de Kronecker
+def KD(a,b):
+    return 1 if a==b else 0
+
+def Hamiltoniana(sb, sk):
+    '''
+    A ideia aqui é simular o processo de sanduíche por meio das funções delta de Kronecker e compreensão de listas. 
+    Por exemplo, um sistema de 3 sítios que pode apenas difundir tem os seguintes estados acessíveis: (1,0,0), (0,1,0), (0,0,1). 
+    Começando pelo primeiro estado, (1,0,0), a particula deve se mover para a direita (1,0,0) -> (0,1,0).
+    Para isso, devo aniquilar o elemento no primeiro sítio, depois criar um novo no sítio adjacente. Por fim fazer a operação de delta para obter um valor na matriz.
+    Os estados são obtidos são obtidos por meio da função generate_fermionic_states e a função Hamiltoniana vai recebe-los como as variáveis sb e sk.
+    Listas vazias para difusão da direita e esquerda, attachment e detachment são criadas.
+    Tendo em mão um estado sk (1,0,0) que chega como uma tupla, é necessário então criar uma lista temporária temp, que recebe a tupla atual sk.
+    O processo de difusão para direita precisa checar se existem partículas no sítio atual temp[i] e se o sítio vizinho temp[i+1] está vazio.
+    Caso ambos sejam verdadeiras, remove a partícula do sítio atual temp[i] -= 1 e adiciona no próximo temp[i+1] += 1.  
+    A variável temporária é transformada em uma tupla que pode ser usada na função KD, e comparada com o valor original 
+    No exemplo, sk = (1,0,0) -> temp = (0,1,0). O resultado é dado por sk[i]*(KD(sb, temp) - KD(sb, sk)) que é o termo de hopping da hamiltoniana é adicionado a lista de difusão.
+    O processo de difusão para o lado esquerdo é simplesmente o inverso (0,1,0) -> (1,0,0). 
+    Os processos de attachment e detachment são similares, para o attachment, preciso somente verificar se o sítio é vazio e adicionar a partícula. 
+    Já o detachment, precisa verificar se o sítio está ocupado para poder remover a partícula de lá.   
+    '''
+    H = 0
+    ATT = 0
+    A = 0
+    DE = 0
+    B = 0
+    for i in range(S):
+        if a[w]!=0 or wa[w]!=0:
+            #ATTACHMENT na cadeia
+            if sk[i]==0:
+                temp = list(sk)
+                temp[i] += 1
+                #Proibir o attachment no último sítio
+                if (sk[-1]-temp[-1])!=0:
+                    temp[i] -= 1
+                    temp = tuple(temp)
+                    add = (KD(sb, temp) - (sk[-1]+1)*KD(sb, sk))
+                    ATT -= (wa[w]*add)
+                #Garantir que attachment no primeiro sítio se dê com a constante correta
+                if (sk[0]-temp[0])!=0:
+                    temp2 = list(temp)
+                    temp[0] -= 1
+                    temp = tuple(temp)
+                    add = (KD(sb, temp) - (sk[0]+1)*KD(sb, sk))
+                    ATT -= (add*wa[w])
+                    temp2 = tuple(temp2)
+                    adda = (KD(sb, temp2) - (sk[0]+1)*KD(sb, sk))
+                    A -= (adda*a[w])
+                #Todo o resto da cadeia
+                else:
+                    temp = tuple(temp)
+                    add = (KD(sb, temp) - (sk[i]+1)*KD(sb, sk))
+                    ATT -= (wa[w]*add)
+        if b[w]!=0 or wd[w]!=0:           
+            #DETACHMENT na cadeia        
+            if sk[i]==1:
+                temp = list(sk)
+                temp[i] -= 1
+                #Proibir o detachment no primeiro sítio
+                if (temp[0]-sk[0])==-1:
+                    temp[0] += 1
+                    temp = tuple(temp)
+                    det = sk[0]*(KD(sb, temp) - KD(sb, sk))
+                    DE -= (det*wd[w])
+                #Garantir que o detachment no último sítio ocorra com a constante correta
+                if (temp[-1]-sk[-1])==-1:
+                    temp2 = list(temp)
+                    temp[-1] += 1
+                    temp = tuple(temp)
+                    det = sk[-1]*(KD(sb, temp) - KD(sb, sk))
+                    DE -= (wd[w]*det)
+                    temp2 = tuple(temp2)
+                    detb = sk[-1]*(KD(sb, temp2) - KD(sb, sk))
+                    B -= (b[w]*detb)
+                #Todo o resto da cadeia
+                else:    
+                    temp = tuple(temp)
+                    det = sk[i]*(KD(sb, temp) - KD(sb, sk))
+                    DE -= (det*wd[w])
+        if i+1<S:           
+            #Difusão para direita
+            if sk[i+1]==0 and sk[i]==1:
+                temp = list(sk)
+                temp[i] -= 1
+                temp[i+1] += 1
+                temp = tuple(temp)
+                ida = sk[i]*(KD(sb, temp) - KD(sb, sk))
+                H -= (dr[w]*ida)
+            #Difusão para esquerda    
+            if sk[i+1]==1 and sk[i]==0:
+                temp = list(sk)
+                temp[i] += 1
+                temp[i+1] -= 1
+                temp = tuple(temp)
+                volta = sk[i+1]*(KD(sb, temp) - KD(sb, sk))
+                H -= (dl[w]*volta)
+    return H+ATT+A+B+DE
+
+def media(config, H, j):
+    a, b, c, d  = 0, 0, 0, 0
+    for i in range(states_number):
+        if config[i][j] != 0:
+            a += config[i][j]*H[i][0]
+            b += (config[i][j]**2)*H[i][0]
+            c += (config[i][j]**3)*H[i][0]
+            d += (config[i][j]**4)*H[i][0]
+    return a, b-a**2, c -3*b*a + 2*a**3, d - 4*c*a - 3*(b**2) + 12*b*(a**2) - 6*(a**4)
+
+
+#Função Hamiltoniana que serve para montar a matriz 
+
+#Função auxiliar que serve para paralelizar o cálculo
+def compute_Hamiltonian_element(i, j):
+    return Hamiltoniana(config[i], config[j])
+
+N=1                 #1 para férmions, 2 para bósons (ainda não implementado)        
+S = 5       #Quantidade de sítios no sistema 
+time = 100        #Tempo de evolução 
+intervalot = 2 #Quantidade de vezes que vou particionar o tempo, quanto maior, mais detalhada a simulação, porém mais lenta.
+qtd = 40       #Tamanho do loop do código, para um bom heatmap o tamanho mínimo necessário é de 35. 
+                    #Lembrando que o código executa (qtd^2) vezes. Ou seja, para um heatmap mínimo serão necessárias 1225 execuções
+
+
+
+fixos = np.linspace(0, 1, qtd)
+
+for master in fixos:
+    
+    a  = np.linspace(0,1,qtd)      # Taxa de attachment no primeiro sítio
+    b  = qtd*[master]               # Taxa de detachment no último sítio
+    wa = qtd*[0]                   # Taxa de attachment nos sítios intermediários
+    wd = qtd*[0]                  # Taxa de detachment nos sítios intermediários
+    dr = qtd*[1]                    # Taxa de difusão para a direita
+    dl = qtd*[1]                    # Taxa de difusão para a esquerda
+    g = 1                           # Essa variável deveria escolher se a difusão é bosônica ou fermiônica, que no momento é obsoleto já que o código serve apenas para férmions   
+    
+    #Lista que vai conter os valores finais de ocupação da cadeia
+    vfocupacao = []
+    
+    for w in range(qtd):
+        
+        #Lista auxiliar para a contagem dos valores de ocupação
+        vf = []     
+        t1 = datetime.datetime.now()
+        #Obtenção dos estados
+        config = generate_fermionic_states(S, N, a, b, wa, wd)
+        t2 = datetime.datetime.now()
+        print(f'tempo de obtenção dos estados = {t2-t1}')
+        # Numero de todos os estados possíveis 
+        states_number = len(config)
+        t3 = datetime.datetime.now()
+        #Calcular a hamiltoniana paralelamente        
+        m = Parallel(n_jobs=-1)(delayed(compute_Hamiltonian_element)(i, j) 
+                                for i in range(states_number) 
+                                for j in range(states_number))
+        m = np.array(m).reshape(states_number, states_number)
+        t4 = datetime.datetime.now()
+        print(f'tempo de calcular as matrizes paralelamente = {t4-t3}')
+        
+        #Conversão da matriz para o ambiente de matrizes esparsa
+        t5 = datetime.datetime.now()
+        msc = csc_array(m)
+        t6 = datetime.datetime.now()
+        print(f'tempo de transformar para esparsa = {t6-t5}')
+        #Evolução temporal do sistema
+        t7 = datetime.datetime.now()
+        T = np.linspace(0, time, intervalot)
+        #p = [[] for _ in range(S)]
+        mean = [[] for _ in range(S)]
+        #variance = [[] for _ in range(S)]
+        #skewness = [[] for _ in range(S)]
+        #curtosis = [[] for _ in range(S)]
+        
+        x=0
+        cumulante = [[] for _ in range(S)]
+        for t in T:
+            P = expmsp(-msc*t).toarray()
+            #Cálculo de todas as cumulantes
+            for i in range(S):
+                #t70 = datetime.datetime.now()
+                #p[i].append(P[i][0])
+                mean[i].append(np.sum([config[j][i] * P[j][0] for j in range(states_number)]))
+                #variance[i].append(media(config, P, i)[1])
+                #skewness[i].append(media(config, P, i)[2])
+                #curtosis[i].append(media(config, P, i)[3])
+                #t75 = datetime.datetime.now()
+        #print(f'tempo de fazer as cumulantes = {t75-t70}')        
+        t8 = datetime.datetime.now()
+        print(f'tempo de fazer a evolução temporal = {t8-t7}')
+        
+        #Loop para captar apenas os valores finais de ocupação da cadeia
+        
+        for m in mean:
+            vf.append(m[-1])
+        vfocupacao.append(vf)
+    
+        
+    #Loop para obtenção dos valores médios finais de ocupação
+    ocupados=[]
+    for m in vfocupacao:
+        conta = sum(m)/len(m)
+        ocupados.append(conta) 
+    
+    #Salvar os valores médios de ocupação em um txt externo
+    for num in vfocupacao:
+        with open('densidade.txt','a') as f:
+            np.savetxt(f,num,fmt="%f", delimiter=',')
+     
+        
+fim = datetime.datetime.now()
+print(f'tempo de execução: {fim-inicio}')
+    
+    
+    
+    
+    
