@@ -1,0 +1,113 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Feb 27 17:46:14 2025
+
+@author: davi
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import seaborn as sns
+
+try:
+    with open("densidade.txt", 'r') as f:
+        k = np.loadtxt(f)
+except FileNotFoundError:
+    print("Error: File not found. Please check the file path.")
+    exit()
+
+
+
+array = [float(i) for i in k]
+
+
+#Atenção na escolha das variáveis qtd e S
+
+qtd = 40  # Quantidade de vezes que rodei o código anterior
+S = 3      # Tamanho da cadeia
+
+
+# Separar os valores obtidos em uma lista com 'qtd^2' listas menores, onde cada uma dessas listas tem 'S' elementos
+intervalos = [array[i:i+S] for i in range(0, len(array), S)]
+
+# Fazer a média de cada sublista dos intervalos, resultando em 'qtd' listas com os valores médios de ocupação
+intervalos = np.array(intervalos)
+medias = [sum(i) / len(i) for i in intervalos]
+ocupmedia = [medias[i:i+qtd] for i in range(0, len(medias), qtd)]
+
+# Extrair os valores do site mais à esquerda (x=0) e mais à direita (x=1)
+leftmost_site = [i[0] for i in intervalos]  # Primeiro site (x=0)
+rightmost_site = [i[-1] for i in intervalos]  # Último site (x=1)
+leftmostjj = [leftmost_site[i:i+qtd] for i in range(0,len(medias), qtd)]
+rightmostjj = [rightmost_site[i:i+qtd] for i in range(0,len(medias), qtd)]
+
+# Reshape os dados para formar uma matriz 2D (qtd x qtd)
+leftmost_avg = np.array(leftmost_site).reshape(qtd, qtd)
+rightmost_avg = np.array(rightmost_site).reshape(qtd, qtd)
+
+# Criar o DataFrame para o heatmap por meio do Pandas
+data = pd.DataFrame(ocupmedia)
+leftmost= pd.DataFrame(leftmost_avg)
+rightmost = pd.DataFrame(rightmost_avg)
+
+#função para criar os tickrates da colorbar
+def intervaloba(valores):
+    intr = []
+    temp1 = min(valores)
+    temp2 = max(valores)
+    intr.append(min(temp1))
+    intr.append(max(temp2))
+    intr = np.linspace(intr[0], intr[1], 10)
+    return intr
+fig, ax1 = plt.subplots(figsize=(15,10))
+
+
+# Plotar os heatmaps usando Matplotlib
+
+'''
+
+Aqui é preciso verificar o que está sendo variado na hora de escolher a legenda e alterar 
+o plt.xlabel e o plt.ylabel
+
+'''
+
+plt.figure(figsize=(15,10))
+pos = plt.imshow(data,
+                  cmap="coolwarm", aspect="auto", origin="lower", extent=[0, 1, 0, 1], zorder=1)
+cbar = plt.colorbar(ticks=intervaloba(ocupmedia))
+pos.figure.axes[-1].yaxis.label.set_size(25)
+# Configurações adicionais do gráfico
+plt.ylabel(r"$\omega_D$", fontsize=20)
+plt.xlabel(r"$\omega_A$", fontsize=20)
+plt.yticks(rotation=0)
+plt.savefig("geral.png",transparent=True)
+plt.show()
+
+
+plt.figure(figsize=(15,10))
+pos2 = plt.imshow(leftmost,
+                  cmap="coolwarm", aspect="auto", origin="lower", extent=[0, 1, 0, 1], zorder=2)
+cbar = plt.colorbar(ticks=intervaloba(leftmostjj))
+pos2.figure.axes[-1].yaxis.label.set_size(25)
+# Configurações adicionais do gráfico
+plt.ylabel(r"$\omega_D$", fontsize=20)
+plt.xlabel(r"$\omega_A$", fontsize=20)
+plt.yticks(rotation=0)
+plt.savefig("leftmost.png",transparent=True)
+plt.show()
+
+
+plt.figure(figsize=(15,10))
+pos2 = plt.imshow(rightmost,
+                  cmap="coolwarm", aspect="auto", origin="lower", extent=[0, 1, 0, 1], zorder=2)
+cbar = plt.colorbar(ticks=intervaloba(rightmostjj))
+pos2.figure.axes[-1].yaxis.label.set_size(25)
+# Configurações adicionais do gráfico
+plt.ylabel(r"$\omega_D$", fontsize=20)
+plt.xlabel(r"$\omega_A$", fontsize=20)
+plt.yticks(rotation=0)
+plt.savefig("rightmost.png",transparent=True)
+plt.show()
+
+
