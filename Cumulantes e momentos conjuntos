@@ -1,0 +1,453 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sat Apr 26 15:35:43 2025
+
+@author: davi
+"""
+
+import numpy as np
+from scipy.sparse import csc_array
+from scipy.sparse.linalg import expm as expmsp
+import itertools
+from joblib import Parallel, delayed
+import matplotlib.pyplot as plt
+import datetime 
+import pandas as pd
+import seaborn as sn
+inicio = datetime.datetime.now()
+
+#Função geradora dos estados acessíveis 
+def generate_fermionic_states(S, N, a, b, wa, wd):
+    
+    config = []
+
+    # Determine the range of N based on the rates
+    min_N = 0 if (b != 0 or wd != 0) else N  # Particles can detach, so N can decrease
+    max_N = S if (a != 0 or wa != 0) else N  # Particles can attach, so N can increase
+
+    # Generate states in parallel for each N in the range
+    def generate_states_for_N(n):
+        states = list(itertools.combinations(range(S), n))
+        config_n = []
+        for state in states:
+            config_i = [0] * S
+            for site in state:
+                config_i[site] = 1
+            config_n.append(tuple(config_i))
+        return config_n
+
+    # Parallelize state generation for each N
+    config = Parallel(n_jobs=-1)(delayed(generate_states_for_N)(n) 
+                                 for n in range(min_N, max_N + 1))
+    
+    # Flatten the list of lists
+    config = [state for sublist in config for state in sublist]
+    
+    return config
+
+#Função Delta de Kronecker
+def KD(a,b):
+    return 1 if a==b else 0
+
+#Função Hamiltoniana que serve para montar a matriz 
+def Hamiltoniana(sb, sk):
+    '''
+    A ideia aqui é simular o processo de sanduíche por meio das funções delta de Kronecker e compreensão de listas. 
+    Por exemplo, um sistema de 3 sítios que pode apenas difundir tem os seguintes estados acessíveis: (1,0,0), (0,1,0), (0,0,1). 
+    Começando pelo primeiro estado, (1,0,0), a particula deve se mover para a direita (1,0,0) -> (0,1,0).
+    Para isso, devo aniquilar o elemento no primeiro sítio, depois criar um novo no sítio adjacente. Por fim fazer a operação de delta para obter um valor na matriz.
+    Os estados são obtidos são obtidos por meio da função generate_fermionic_states e a função Hamiltoniana vai recebe-los como as variáveis sb e sk.
+    Listas vazias para difusão da direita e esquerda, attachment e detachment são criadas.
+    Tendo em mão um estado sk (1,0,0) que chega como uma tupla, é necessário então criar uma lista temporária temp, que recebe a tupla atual sk.
+    O processo de difusão para direita precisa checar se existem partículas no sítio atual temp[i] e se o sítio vizinho temp[i+1] está vazio.
+    Caso ambos sejam verdadeiras, remove a partícula do sítio atual temp[i] -= 1 e adiciona no próximo temp[i+1] += 1.  
+    A variável temporária é transformada em uma tupla que pode ser usada na função KD, e comparada com o valor original 
+    No exemplo, sk = (1,0,0) -> temp = (0,1,0). O resultado é dado por sk[i]*(KD(sb, temp) - KD(sb, sk)) que é o termo de hopping da hamiltoniana é adicionado a lista de difusão.
+    O processo de difusão para o lado esquerdo é simplesmente o inverso (0,1,0) -> (1,0,0). 
+    Os processos de attachment e detachment são similares, para o attachment, preciso somente verificar se o sítio é vazio e adicionar a partícula. 
+    Já o detachment, precisa verificar se o sítio está ocupado para poder remover a partícula de lá.   
+    '''
+    H = 0
+    ATT = 0
+    A = 0
+    DE = 0
+    B = 0
+    for i in range(S):
+        if a!=0 or wa!=0:
+            #ATTACHMENT na cadeia
+            if sk[i]==0:
+                temp = list(sk)
+                temp[i] += 1
+                #Proibir o attachment no último sítio
+                if (sk[-1]-temp[-1])!=0:
+                    temp[i] -= 1
+                    temp = tuple(temp)
+                    add = (KD(sb, temp) - (sk[-1]+1)*KD(sb, sk))
+                    ATT -= (wa*add)
+                #Garantir que attachment no primeiro sítio se dê com a constante correta
+                if (sk[0]-temp[0])!=0:
+                    temp2 = list(temp)
+                    temp[0] -= 1
+                    temp = tuple(temp)
+                    add = (KD(sb, temp) - (sk[0]+1)*KD(sb, sk))
+                    ATT -= (add*wa)
+                    temp2 = tuple(temp2)
+                    adda = (KD(sb, temp2) - (sk[0]+1)*KD(sb, sk))
+                    A -= (adda*a)
+                #Todo o resto da cadeia
+                else:
+                    temp = tuple(temp)
+                    add = (KD(sb, temp) - (sk[i]+1)*KD(sb, sk))
+                    ATT -= (wa*add)
+        if b!=0 or wd!=0:           
+            #DETACHMENT na cadeia        
+            if sk[i]==1:
+                temp = list(sk)
+                temp[i] -= 1
+                #Proibir o detachment no primeiro sítio
+                if (temp[0]-sk[0])==-1:
+                    temp[0] += 1
+                    temp = tuple(temp)
+                    det = sk[0]*(KD(sb, temp) - KD(sb, sk))
+                    DE -= (det*wd)
+                #Garantir que o detachment no último sítio ocorra com a constante correta
+                if (temp[-1]-sk[-1])==-1:
+                    temp2 = list(temp)
+                    temp[-1] += 1
+                    temp = tuple(temp)
+                    det = sk[-1]*(KD(sb, temp) - KD(sb, sk))
+                    DE -= (wd*det)
+                    temp2 = tuple(temp2)
+                    detb = sk[-1]*(KD(sb, temp2) - KD(sb, sk))
+                    B -= (b*detb)
+                #Todo o resto da cadeia
+                else:    
+                    temp = tuple(temp)
+                    det = sk[i]*(KD(sb, temp) - KD(sb, sk))
+                    DE -= (det*wd)
+        if i+1<S:           
+            #Difusão para direita
+            if sk[i+1]==0 and sk[i]==1:
+                temp = list(sk)
+                temp[i] -= 1
+                temp[i+1] += 1
+                temp = tuple(temp)
+                ida = sk[i]*(KD(sb, temp) - KD(sb, sk))
+                H -= (dr*ida)
+            #Difusão para esquerda    
+            if sk[i+1]==1 and sk[i]==0:
+                temp = list(sk)
+                temp[i] += 1
+                temp[i+1] -= 1
+                temp = tuple(temp)
+                volta = sk[i+1]*(KD(sb, temp) - KD(sb, sk))
+                H -= (dl*volta)
+    return H+ATT+A+B+DE
+
+def media(config, H, j):
+    a, b, c, d, d2  = 0, 0, 0, 0, 0
+    for i in range(states_number):
+        if config[i][j] != 0:
+            a += config[i][j]*H[i][0]
+            b += (config[i][j]**2)*H[i][0]
+            c += (config[i][j]**3)*H[i][0]
+            d += (config[i][j]**4)*H[i][0]
+            d2 += (config[i][j]**4)*H[i][0]
+    return a, b-a**2, c -3*b*a + 2*a**3, d - 4*c*a - 3*(b**2) + 12*b*(a**2) - 6*(a**4)
+    return d2
+
+def compute_Hamiltonian_element(i, j):
+    return Hamiltoniana(config[i], config[j])
+
+def joint_moments(config, P):
+    S = len(config[0])
+    means = np.array([np.sum([c[j] * P[m][0] for m, c in enumerate(config)]) 
+                   for j in range(S)])
+    joint_moments = np.zeros((S, S))
+    
+    for j in range(S):
+        for k in range(S):
+            joint_moments[j, k] = np.sum([c[j] * c[k] * P[m][0] 
+                                        for m, c in enumerate(config)])
+    return joint_moments
+
+
+N=1                #1 para férmions, 2 para bósons (ainda não implementado)        
+S = 10   #Quantidade de sítios no sistema 
+time = 20    #Tempo de evolução 
+intervalot = 25 #Quantidade de vezes que vou particionar o tempo, quanto maior, mais detalhada a simulação, porém mais lenta.
+
+
+
+a  = 0                 # Taxa de attachment no primeiro sítio
+b  = 0                 # Taxa de detachment no último sítio
+wa = 1                  # Taxa de attachment nos sítios intermediários
+wd = 1                 # Taxa de detachment nos sítios intermediários
+dr = 1                 # Taxa de difusão para a direita
+dl = 0                 # Taxa de difusão para a esquerda
+g = 1                   # Essa variável deveria escolher se a difusão é bosônica ou fermiônica, que no momento é obsoleto já que o código serve apenas para férmions   
+
+#Lista que vai conter os valores finais de ocupação da cadeia
+vfocupacao = []
+
+#Lista auxiliar para a contagem dos valores de ocupação
+vf = []     
+t1 = datetime.datetime.now()
+#Obtenção dos estados
+config = generate_fermionic_states(S, N, a, b, wa, wd)
+t2 = datetime.datetime.now()
+print(f'tempo de obtenção dos estados = {t2-t1}')
+# Numero de todos os estados possíveis 
+states_number = len(config)
+t3 = datetime.datetime.now()
+#Calcular a hamiltoniana paralelamente        
+m = Parallel(n_jobs=-1)(delayed(compute_Hamiltonian_element)(i, j) 
+                        for i in range(states_number) 
+                        for j in range(states_number))
+m = np.array(m).reshape(states_number, states_number)
+t4 = datetime.datetime.now()
+print(f'tempo de calcular as matrizes paralelamente = {t4-t3}')
+
+#Conversão da matriz para o ambiente de matrizes esparsa
+t5 = datetime.datetime.now()
+msc = csc_array(m)
+t6 = datetime.datetime.now()
+print(f'tempo de transformar para esparsa = {t6-t5}')
+#Evolução temporal do sistema
+t7 = datetime.datetime.now()
+T = np.linspace(0, time, intervalot)
+p = [[] for _ in range(S)]
+mean = [[] for _ in range(S)]
+variance = [[] for _ in range(S)]
+skewness = [[] for _ in range(S)]
+curtosis = [[] for _ in range(S)]
+cop = [[] for _ in range(S-1)]
+coo = [[] for _ in range(S)]
+cod = []
+x=0
+
+for t in T:
+    P = expmsp(-msc*t).toarray()
+    cod.append(np.sum([config[m][0] * config[m][-1] * P[m][0] for m in range(len(config))]))
+    
+    for i in range(S):
+        
+        #t70 = datetime.datetime.now()
+        p[i].append(P[i][0])
+        #mean[i].append(np.sum([config[j][i] * P[j][0] for j in range(states_number)]))
+        mean[i].append(media(config, P, i)[0])
+        variance[i].append(media(config, P, i)[1])
+        skewness[i].append(media(config, P, i)[2])
+        curtosis[i].append(media(config, P, i)[3])
+        
+        coo[i].append(np.sum([config[m][i] * config[m][i] * P[m][0] for m in range(len(config))]))
+        if i+1<S:
+            
+            cop[i].append(np.sum([config[m][i] * config[m][i+1] * P[m][0] for m in range(len(config))]))
+            
+        #t75 = datetime.datetime.now()
+#print(f'tempo de fazer as cumulantes = {t75-t70}')        
+t8 = datetime.datetime.now()
+
+temp = []
+temp1 = []
+temp2 = []
+for w in range(S):
+    temp2.append(mean[w])
+    if w+1<S:
+        temp.append(mean[w])
+        temp1.append(mean[w+1])
+mep = []
+mee = []
+for x in range(len(temp)):
+    #print(temp[x],temp1[x])     
+    #print(x)    
+    mep.append([a*b for a,b in zip(temp[x], temp1[x])])
+for x in range(S):
+    mee.append([a*b for a,b in zip(temp2[x], temp2[x])])
+
+m1 = mean[0]
+m2 = mean[1]
+mf = mean[-1]
+mv, md, mm = [], [], []
+
+for i in range(len(mep)):  
+    #mv.append([a+b for a,b in zip(mep[i], cop[i])])
+    mv.append(mep[i])
+for i in range(S):    
+    #mm.append([a+b for a,b in zip(mee[i], coo[i])])
+    mm.append(mee[i])
+for i in range(len(m1)):
+    #md.append(m1[i]*mf[i]+cod[i])
+    md.append(m1[i]*mf[i])
+    
+
+print(f'tempo de fazer a evolução temporal = {t8-t7}')
+
+
+mediasfinais=[]
+for i in mean:
+    mediasfinais.append(i[-1])
+
+
+
+
+# Calculo dos momentos cojuntos
+jm_correct = np.zeros((S, S))
+for j in range(S):
+    for k in range(S):
+        jm_correct[j, k] = np.sum([c[j] * c[k] * P[m][0] 
+                                 for m, c in enumerate(config)])
+
+#
+#Plot dos gráficos
+yticks = np.arange(1, S+1, 1)  # 11 ticks de 0 a 1
+xticks = np.arange(1, S+1, 1)
+plt.figure(figsize=(15, 10), dpi = 144)
+hm = sn.heatmap(jm_correct, annot=True, fmt=".5f", cmap="coolwarm", 
+            vmin=0, vmax=1, cbar_kws={"label": r"$\langle n_i n_j \rangle$"},
+            annot_kws={"size": 25 / np.sqrt(len(jm_correct))},
+            xticklabels=xticks, yticklabels=yticks, zorder=1)
+hm.invert_yaxis()
+hm.figure.axes[-1].yaxis.label.set_size(25)
+plt.ylabel("Sítio i", fontsize=20)
+plt.xlabel("Sítio j", fontsize=20)
+#plt.xlim(1,S+1)
+plt.yticks(rotation=0)
+plt.savefig("heatmap.png")
+plt.show()
+
+# cores de cada gráfico
+color = ['r-']
+for i in range(S-1):
+    color.append(':')
+color[-1] = 'k-' 
+
+# Gráfico média
+fig, ax = plt.subplots(figsize=(15, 10), facecolor=(1, 1, 1))
+
+for j in range(S):
+    ax.plot(T, mean[j], color[j], linewidth=4, label= "$n_{" + str(j+1) + "}$")
+    #ax.plot(T, mean[j], color[j], linewidth=4, label= r'$\langle$'+"$n_{" + str(j+1) + "}$"+ r'$\rangle_c$')
+
+ax.legend(loc='best', fontsize=14, frameon = True,
+          ncol=5, columnspacing = 1)
+plt.yticks(np.arange(0, 11, np.max(config)/5))
+plt.ylim(0, np.max(config))
+plt.xticks(np.arange(0, 90, t/5))
+plt.xlim(-0.05, t)
+plt.tick_params(labelsize=15)
+plt.xlabel('t',fontsize=20)
+plt.ylabel(r'$\langle n_j \rangle$', fontsize=20)
+plt.grid()
+plt.savefig("mean.png")
+plt.show()        
+#
+#****************************************************************************
+#
+#Gráfico variância
+fig, ax = plt.subplots(figsize=(15, 10), facecolor=(1, 1, 1))
+for j in range(S):
+    ax.plot(T, variance[j], color[j], linewidth=4,  label="$n_{" + str(j+1) + "}$")
+ax.legend(loc='best', fontsize=14, frameon = True,
+          ncol=5, columnspacing = 1)
+plt.yticks(np.arange(0, 11, np.max(config)/5))
+plt.ylim(0, 0.4)
+plt.xticks(np.arange(0, 90, t/5))
+plt.xlim(-0.05, t)
+plt.tick_params(labelsize=15)
+plt.xlabel('t',fontsize=20)
+plt.ylabel(r'$ \sigma^{2}_j $', fontsize=20)
+plt.grid()
+plt.savefig("variance.png")
+plt.show()        
+#
+#****************************************************************************
+#
+#
+#****************************************************************************
+
+
+#Gráfico Skewness
+fig, ax = plt.subplots(figsize=(15, 10), facecolor=(1, 1, 1))
+
+for j in range(S):
+    #ax.plot(T, skewness[j], color[j], linewidth=4, label= r'$\langle$'+"$n^3_{" + str(j+1) + "}$"+ r'$\rangle_c$')
+    ax.plot(T, skewness[j], color[j], linewidth=4, label= "$n_{" + str(j+1) + "}$")
+ax.legend(loc='best', fontsize=14, frameon = True,
+          ncol=5, columnspacing = 1)
+plt.yticks(np.arange(-1, 11, np.max(config)/25))
+plt.ylim(-0.15, 0.15)
+plt.xticks(np.arange(0, 90, t/5))
+plt.xlim(-0.05, t)
+plt.tick_params(labelsize=15)
+plt.xlabel('t',fontsize=20)
+plt.ylabel(r'$\gamma_1$', fontsize=20)
+plt.grid()
+plt.savefig("skew.png")
+plt.show()        
+#
+#****************************************************************************
+#
+#Gráfico Curtosis
+fig, ax = plt.subplots(figsize=(15, 10), facecolor=(1, 1, 1))
+for j in range(S):
+    #ax.plot(T, curtosis[j], color[j], linewidth=4, label= r'$\langle$'+"$n^4_{" + str(j+1) + "}$"+ r'$\rangle_c$')
+    ax.plot(T, curtosis[j], color[j], linewidth=4, label= "$n_{" + str(j+1) + "}$")
+ax.legend(loc='best', fontsize=14, frameon = True,
+          ncol=5, columnspacing = 1)
+plt.yticks(np.arange(-1, 11, np.max(config)/25))
+plt.ylim(-0.15, np.max(curtosis))
+plt.xticks(np.arange(0, 90, t/5))
+plt.xlim(-0.05, t)
+plt.tick_params(labelsize=15)
+plt.xlabel('t',fontsize=20)
+plt.ylabel(r'$\gamma_2$', fontsize=20)
+plt.grid()
+plt.savefig("kurtosis.png")
+plt.show()        
+
+x = np.linspace(1,S,num=S)
+aux=[]
+for i in mean:
+    aux.append(i[-1])
+fig, ax = plt.subplots(figsize=(15, 10), facecolor=(1, 1, 1))
+ax.scatter(x, aux)
+#ax.legend(loc='best', fontsize=14)
+plt.yticks(np.arange(-1, 11, np.max(config)/25))
+plt.ylim(0, np.max(aux)+0.1)
+plt.xticks(np.arange(0, 90, S/5))
+plt.xlim(0.0, S+1)
+plt.tick_params(labelsize=15)
+plt.xlabel('sítios',fontsize=20)
+plt.ylabel(r'$\left<n\right>$', fontsize=20)
+plt.grid()
+plt.savefig("kurtosiyyyyys.png")
+plt.show()        
+
+color[S-2] = 'k-'
+
+fig, ax = plt.subplots(figsize=(15, 10), facecolor=(1, 1, 1))
+for j in range(S-1):
+    ax.plot(T, mv[j], color[j], linewidth=4, label= "$n_{" + str(j+1) + "}$""$n_{" + str(j+2) + "}$")
+ax.plot(T, md, linewidth=4, color = 'm', label= "$n_{" + str(1) + "}$""$n_{" + str(S) + "}$") 
+       
+ax.legend(loc='best', fontsize=14, frameon = True,
+          ncol=5, columnspacing = 1)
+plt.yticks(np.arange(0, 11, np.max(config)/10))
+plt.ylim(0, np.max(mv)+0.1)
+plt.xticks(np.arange(0, 90, t/5))
+plt.xlim(-0.05, t)
+plt.tick_params(labelsize=15)
+plt.xlabel('t',fontsize=20)
+plt.ylabel(r'$\langle n_i(t) n_j(t) \rangle$', fontsize=20)
+plt.grid()
+plt.savefig("conjuntos.png")
+plt.show()  
+
+
+fim = datetime.datetime.now()
+print(f'tempo de execução: {fim-inicio}')
+    
+    
+    
