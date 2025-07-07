@@ -407,6 +407,8 @@ plt.grid()
 plt.savefig("kurtosis.png")
 plt.show()        
 
+##Gráfico da distribuição de valores esperados (não aparece no trabalho)
+
 x = np.linspace(1,S,num=S)
 aux=[]
 for i in mean:
@@ -422,7 +424,7 @@ plt.tick_params(labelsize=15)
 plt.xlabel('sítios',fontsize=20)
 plt.ylabel(r'$\left<n\right>$', fontsize=20)
 plt.grid()
-plt.savefig("kurtosiyyyyys.png")
+plt.savefig("dist.png")
 plt.show()        
 
 color[S-2] = 'k-'
